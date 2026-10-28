@@ -15,7 +15,7 @@ Built for and tested on the **JBL Charge 4**, where it is confirmed to work. It 
 Requirements: Windows 10 or 11. Nothing else, it runs on the .NET Framework 4 that ships with Windows.
 
 1. Download `AUXDropoutFix.exe` from the link above.
-2. Put it in a folder of your choice, or build it yourself with `Build.cmd`, then run `tools\install.ps1` in PowerShell. The program is copied to `%LOCALAPPDATA%\Programs\AUXDropoutFix`, added to Windows startup and started.
+2. Double-click it. It installs itself for your user (no administrator rights needed), adds itself to Windows startup and starts running in the background.
 3. If Windows SmartScreen warns you, click "More info" › "Run anyway". The warning appears because the program is not signed.
 
 ## Highlights
@@ -55,11 +55,11 @@ The program opens its own audio stream on the output with WASAPI (shared mode, e
 
 ## Updating
 
-The program does not update itself. To install a new version, download it and run `tools\install.ps1` again. The running copy is stopped and the new one is started.
+The program does not update itself. To install a new version, download it and double-click it. The running copy is stopped and replaced.
 
 ## Uninstalling
 
-Run `tools\uninstall.ps1` in PowerShell. The program is stopped, removed from Windows startup, and its program folder and its settings and log folder are deleted.
+Go to Settings › Apps › Installed apps, find AUX Dropout Fix and choose Uninstall. The program is stopped, removed from Windows startup, and its program folder and its settings and log folder are deleted.
 
 ## Your data
 

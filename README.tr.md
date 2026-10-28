@@ -15,7 +15,7 @@ Bazı hoparlörler 3,5 mm girişteki sinyal zayıflayınca kendini susturur. Bil
 Gereksinim: Windows 10 ya da 11. Başka bir şey gerekmez, Windows'un kendi .NET Framework 4'ü yeter.
 
 1. Yukarıdaki bağlantıdan `AUXDropoutFix.exe` dosyasını indirin.
-2. Dosyayı bir klasöre koyun ya da `Build.cmd` ile kendiniz derleyin, ardından PowerShell'de `tools\install.ps1` betiğini çalıştırın. Program `%LOCALAPPDATA%\Programs\AUXDropoutFix` klasörüne kopyalanır, Windows açılışına yazılır ve başlar.
+2. Dosyaya çift tıklayın. Program kendini kullanıcınız için kurar (yönetici izni gerekmez), Windows açılışına yazar ve arka planda çalışmaya başlar.
 3. Windows SmartScreen uyarırsa "Daha fazla bilgi" › "Yine de çalıştır"ı seçin. Uyarı programın imzalı olmamasından çıkar.
 
 ## Öne çıkanlar
@@ -55,11 +55,11 @@ Program Windows'un ses arayüzüyle (WASAPI, paylaşımlı kip, olay güdümlü,
 
 ## Güncelleme
 
-Program kendini güncellemez. Yeni sürümü indirip `tools\install.ps1` betiğini yeniden çalıştırın, çalışan kopya kapatılıp yenisi başlatılır.
+Program kendini güncellemez. Yeni sürümü indirip çift tıklayın, çalışan kopya kapatılıp yenisiyle değiştirilir.
 
 ## Kaldırma
 
-PowerShell'de `tools\uninstall.ps1` betiğini çalıştırın. Program kapatılır, Windows açılışından silinir, program klasörü ile ayar ve günlük klasörü silinir.
+Ayarlar › Uygulamalar › Yüklü uygulamalar'da AUX Dropout Fix'i bulup Kaldır'ı seçin. Program kapatılır, Windows açılışından silinir, program klasörü ile ayar ve günlük klasörü silinir.
 
 ## Verileriniz
 

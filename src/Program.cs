@@ -37,11 +37,15 @@ namespace AuxDropoutFix
         static int Main(string[] args)
         {
             exitEvent = new EventWaitHandle(false, EventResetMode.ManualReset, @"Local\AUXDropoutFixExit");
-            if (args.Length > 0 && args[0].Equals("/exit", StringComparison.OrdinalIgnoreCase))
+            string command = args.Length > 0 ? args[0].ToLowerInvariant() : "";
+            if (command == "/exit")
             {
                 exitEvent.Set();
                 return 0;
             }
+            if (command == "/uninstall") return Setup.Uninstall(exitEvent);
+            // Started from anywhere other than the install folder (for example the Downloads folder): install and quit.
+            if (command != "/quiet" && !Setup.IsInstalledCopy()) return Setup.Install(exitEvent, command == "/silent");
             bool firstInstance;
             var instanceLock = new Mutex(true, @"Local\AUXDropoutFixSingle", out firstInstance);
             if (!firstInstance) return 0;
