@@ -1,0 +1,54 @@
+# CodeQL security scan, advanced setup ("CodeQL Advanced"). The C# code is scanned without building it (build-mode: none).
+# GitHub's default setup must be turned off, the two cannot run together:
+#   gh api -X PATCH repos/SCgrS/AUX-Dropout-Fix/code-scanning/default-setup -f state=not-configured
+name: CodeQL Advanced
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * 1"   # every Monday at 03:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Scan (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [csharp, actions]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+
+      - name: Scan
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"
+
+      # The analysis step succeeds even when the scan finds alerts. This step counts the open CodeQL alerts on the main
+      # branch (on a pull request, on that request) and fails the job if there are any, so a "passing" badge means there
+      # are no open alerts. A false alarm is dismissed with a reason in the Security tab.
+      - name: Fail if there are open alerts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          count=$(gh api "repos/$GITHUB_REPOSITORY/code-scanning/alerts?state=open&tool_name=CodeQL&ref=$GITHUB_REF&per_page=100" --jq 'length')
+          echo "Open CodeQL alerts: $count"
+          test "$count" -eq 0

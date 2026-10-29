@@ -1,0 +1,32 @@
+# Dependency review: The workflow fails if a push or pull request adds a library with a known vulnerability or moves a
+# library to a vulnerable version. GitHub's dependency graph does the comparison. It only looks at what that change adds.
+# Vulnerabilities announced later for libraries already in the repository are shown by Dependabot alerts.
+name: Dependency Review
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    name: Review
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Review dependencies
+        uses: actions/dependency-review-action@v5
+        with:
+          # On a push the commits before and after it are compared, on a pull request its base and head. If either input
+          # is set, the action uses them regardless of the event type, so both are filled for both events.
+          base-ref: ${{ github.event.pull_request.base.sha || github.event.before }}
+          head-ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          # No requests to outside services (deps.dev, securityscorecards.dev) for OpenSSF scores, so an outage there
+          # cannot fail the review.
+          show-openssf-scorecard: false
