@@ -1,7 +1,5 @@
 # AUX Dropout Fix
 
-### [⬇ Windows için indir (AUXDropoutFix.exe)](https://github.com/SCgrS/AUX-Dropout-Fix/releases/latest/download/AUXDropoutFix.exe)
-
 [English](README.md)
 
 Bilgisayarın sesi kısıkken taşınabilir hoparlörlerin kablo girişinde kesilmesini önleyen küçük bir **Windows arka plan aracı**.
@@ -12,11 +10,14 @@ Bazı hoparlörler 3,5 mm girişteki sinyal zayıflayınca kendini susturur. Bil
 
 ## Kurulum
 
-Gereksinim: Windows 10 ya da 11. Başka bir şey gerekmez, Windows'un kendi .NET Framework 4'ü yeter.
+Gereksinim: Windows 10 ya da 11. Başka bir şey gerekmez. Program Windows'un kendi .NET Framework 4'üyle çalışır.
 
-1. Yukarıdaki bağlantıdan `AUXDropoutFix.exe` dosyasını indirin.
-2. Dosyaya çift tıklayın. Program kendini kullanıcınız için kurar (yönetici izni gerekmez), Windows açılışına yazar ve arka planda çalışmaya başlar.
-3. Windows SmartScreen uyarırsa "Daha fazla bilgi" › "Yine de çalıştır"ı seçin. Uyarı programın imzalı olmamasından çıkar.
+Henüz hazır bir indirme dosyası yok. Program, kaynak kodundan Windows'un kendi C# derleyicisiyle derlenir.
+
+1. Bu sayfada **Code › Download ZIP**'i seçin ve zip dosyasını bir klasöre çıkarın.
+2. `Build.cmd` dosyasına çift tıklayın. `bin\AUXDropoutFix.exe` oluşur.
+3. `bin\AUXDropoutFix.exe` dosyasına çift tıklayın. Program kendini kullanıcınız için kurar (yönetici izni gerekmez), Windows açılışına ve **Ayarlar › Uygulamalar › Yüklü uygulamalar** listesine yazar, arka planda çalışmaya başlar. Kurulduğunu bir iletiyle bildirir.
+4. Windows SmartScreen uyarırsa **Daha fazla bilgi** › **Yine de çalıştır**'ı seçin. Uyarı dosyaların imzalı olmamasından çıkar.
 
 ## Öne çıkanlar
 
@@ -55,15 +56,13 @@ Program Windows'un ses arayüzüyle (WASAPI, paylaşımlı kip, olay güdümlü,
 
 ## Güncelleme
 
-Program kendini güncellemez. Yeni sürümü indirip çift tıklayın, çalışan kopya kapatılıp yenisiyle değiştirilir.
+Program kendini güncellemez. Yeni sürümü yukarıdaki gibi indirip yeniden derleyin, sonra yeni `bin\AUXDropoutFix.exe` dosyasına çift tıklayın. Çalışan kopya kapatılıp yenisiyle değiştirilir.
 
-## Kaldırma
+## Veri gizliliği
 
-Ayarlar › Uygulamalar › Yüklü uygulamalar'da AUX Dropout Fix'i bulup Kaldır'ı seçin. Program kapatılır, Windows açılışından silinir, program klasörü ile ayar ve günlük klasörü silinir.
+Program internete bağlanmaz, hiçbir veri göndermez, kullanım verisi toplamaz. Ayarlarını `%LOCALAPPDATA%\AUXDropoutFix\settings.txt` dosyasından okur, yalnızca `%LOCALAPPDATA%\AUXDropoutFix\log.txt` dosyasına başlama, kapanma ve hata satırları yazar. Günlük dosyası 200 KB'ı geçince silinip yeniden başlar.
 
-## Verileriniz
-
-Program internete bağlanmaz ve hiçbir veri göndermez. Yalnızca `%LOCALAPPDATA%\AUXDropoutFix\log.txt` dosyasına başlama, kapanma ve hata satırları yazar. Dosya 200 KB'ı geçince silinip yeniden başlar.
+Program **Ayarlar › Uygulamalar › Yüklü uygulamalar**'dan kaldırılınca kapatılır, Windows açılışından silinir, program klasörü ile ayar ve günlük klasörü de silinir.
 
 ## Üçüncü taraf bileşenler
 
