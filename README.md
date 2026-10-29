@@ -1,7 +1,5 @@
 # AUX Dropout Fix
 
-### [⬇ Download for Windows (AUXDropoutFix.exe)](https://github.com/SCgrS/AUX-Dropout-Fix/releases/latest/download/AUXDropoutFix.exe)
-
 [Türkçe](README.tr.md)
 
 A small **Windows background tool** that stops portable speakers from cutting out over the AUX cable when your PC volume is low.
@@ -12,11 +10,14 @@ Built for and tested on the **JBL Charge 4**, where it is confirmed to work. It 
 
 ## Installation
 
-Requirements: Windows 10 or 11. Nothing else, it runs on the .NET Framework 4 that ships with Windows.
+Requirements: Windows 10 or 11. Nothing else is needed. The program runs on the .NET Framework 4 that ships with Windows.
 
-1. Download `AUXDropoutFix.exe` from the link above.
-2. Double-click it. It installs itself for your user (no administrator rights needed), adds itself to Windows startup and starts running in the background.
-3. If Windows SmartScreen warns you, click "More info" › "Run anyway". The warning appears because the program is not signed.
+There is no ready-made download yet. The program is built from its source code with the C# compiler that ships with Windows.
+
+1. On this page, choose **Code › Download ZIP** and extract the ZIP file.
+2. Double-click `Build.cmd`. It creates `bin\AUXDropoutFix.exe`.
+3. Double-click `bin\AUXDropoutFix.exe`. It installs itself for your user (no administrator rights needed), adds itself to Windows startup and to **Settings › Apps › Installed apps**, and starts running in the background. A message confirms that it is installed.
+4. If Windows SmartScreen warns you, click **More info** › **Run anyway**. The warning appears because the files are not signed.
 
 ## Highlights
 
@@ -55,15 +56,13 @@ The program opens its own audio stream on the output with WASAPI (shared mode, e
 
 ## Updating
 
-The program does not update itself. To install a new version, download it and double-click it. The running copy is stopped and replaced.
+The program does not update itself. To install a new version, download and build it again as described above, then double-click the new `bin\AUXDropoutFix.exe`. The running copy is stopped and replaced.
 
-## Uninstalling
+## Privacy
 
-Go to Settings › Apps › Installed apps, find AUX Dropout Fix and choose Uninstall. The program is stopped, removed from Windows startup, and its program folder and its settings and log folder are deleted.
+The program does not connect to the internet, sends nothing and has no telemetry. It reads its settings from `%LOCALAPPDATA%\AUXDropoutFix\settings.txt` and only writes start, stop and error lines to `%LOCALAPPDATA%\AUXDropoutFix\log.txt`. The log file starts over once it passes 200 KB.
 
-## Your data
-
-The program does not connect to the internet and sends nothing. It only writes start, stop and error lines to `%LOCALAPPDATA%\AUXDropoutFix\log.txt`. The file starts over once it passes 200 KB.
+Uninstalling it from **Settings › Apps › Installed apps** stops the program, removes it from Windows startup, and deletes its program folder and its settings and log folder.
 
 ## Third-party components
 
