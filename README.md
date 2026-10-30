@@ -70,6 +70,11 @@ Uninstalling it from **Settings › Apps › Installed apps** stops the program,
 
 None. The program only uses components that ship with Windows.
 
+## Automated checks
+
+[![CodeQL Advanced](https://github.com/SCgrS/AUX-Dropout-Fix/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/SCgrS/AUX-Dropout-Fix/actions/workflows/codeql.yml)\
+[![Dependency Review](https://github.com/SCgrS/AUX-Dropout-Fix/actions/workflows/dependency-review.yml/badge.svg?branch=main)](https://github.com/SCgrS/AUX-Dropout-Fix/actions/workflows/dependency-review.yml)
+
 ## Thanks
 
 The [Reverse-engineering JBL flip 4](https://hackaday.io/project/162337-reverse-engineering-jbl-flip-4) project on Hackaday showed that these speakers mute the AUX input in hardware, based on signal level. The idea of a constant low-frequency signal also comes from there and from [this iFixit discussion](https://www.ifixit.com/Answers/View/405479/Why+playing+via+AUX+cut's+on+quiet+passages+in+the+songs-movies).

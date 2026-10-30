@@ -70,6 +70,11 @@ Program **Ayarlar › Uygulamalar › Yüklü uygulamalar**'dan kaldırılınca 
 
 Yok. Program yalnızca Windows'un kendi bileşenlerini kullanır.
 
+## Otomatik denetimler
+
+[![CodeQL Advanced](https://github.com/SCgrS/AUX-Dropout-Fix/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/SCgrS/AUX-Dropout-Fix/actions/workflows/codeql.yml)\
+[![Dependency Review](https://github.com/SCgrS/AUX-Dropout-Fix/actions/workflows/dependency-review.yml/badge.svg?branch=main)](https://github.com/SCgrS/AUX-Dropout-Fix/actions/workflows/dependency-review.yml)
+
 ## Teşekkür
 
 Bu hoparlörlerin kablo girişini devrede, sinyalin gücüne bakarak susturduğunu Hackaday'deki [Reverse-engineering JBL flip 4](https://hackaday.io/project/162337-reverse-engineering-jbl-flip-4) projesi ortaya koydu. Sürekli alçak frekans sinyali fikri de oradan ve [iFixit'teki tartışmadan](https://www.ifixit.com/Answers/View/405479/Why+playing+via+AUX+cut's+on+quiet+passages+in+the+songs-movies) geliyor.
