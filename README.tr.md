@@ -34,7 +34,7 @@ Sinyal "High Definition Audio Device" kartının ilk etkin hoparlör ya da hat �
 
 Windows sesi yaklaşık %7'nin altına inince sinyal daha fazla güçlendirilemez ve zayıflamaya başlar. JBL Charge 4'te %5'te kesilme olmadı. Daha aşağısında hoparlör yeniden susabilir.
 
-Başka bir program yüksek sesle çalarken sinyal geri çekilir, ikisinin toplamı tam ölçeği aşıp cızırdamasın diye. Hoparlör yüksek sesli yerlerde zaten susmaz.
+Başka bir program yüksek sesle çalarken sinyal geri çekilir, ikisinin toplamı tam ölçeği aşıp cızırdamasın diye. Son yüksek notadan sonra yaklaşık iki saniye geride kalır, böylece bir sonraki nota onu tam yükselirken yakalamaz. Hoparlör yüksek sesli yerlerde zaten susmaz.
 
 ### Ayarlar
 
@@ -54,7 +54,7 @@ Hoparlör aynı bilgisayara hem ses kablosuyla hem de şarj için USB ile bağl�
 
 ### Nasıl çalışır
 
-Program Windows'un ses arayüzüyle (WASAPI, paylaşımlı kip, olay güdümlü, 20 ms tampon) çıkışa kendi ses akışını açar. Yarım saniyede bir o çıkıştaki ses oturumlarına bakar. Başka bir programın oturumu yalnızca gerçekten ses çıkarırken çalıyor sayılır, sessiz bir akışı açık tutan program sinyali açmaz. Ses başlayınca akış başlatılır, sinyal yavaşça kapandıktan sonra durdurulur. Akış çalışırken program her 10 ms'de Windows ses düzeyini ve öbür programların tepe düzeyini okur, sinyalin genliğini buna göre ayarlar. Windows'un görüşmeler sırasında öbür sesleri kısma özelliğinin dışında kalır. 32 bit süreç olarak çalışır, bu daha az bellek ister. `tools\sessions.ps1` o anda hangi programların ses çaldığını gösterir.
+Program Windows'un ses arayüzüyle (WASAPI, paylaşımlı kip, olay güdümlü) çıkışa kendi ses akışını açar ve sinyalin yaklaşık 40 ms'sini hep sırada tutar, böylece bilgisayarın bir anlık yoğunluğu sinyalde boşluk bırakmaz. O çıkıştaki ses oturumlarına ayrı bir iş parçacığı bakar: Sinyal çalarken saniyede on, öbür zamanlarda iki kez. Sinyal bu yüzden hiç beklemez. Başka bir programın oturumu yalnızca gerçekten ses çıkarırken çalıyor sayılır, sessiz bir akışı açık tutan program sinyali açmaz. Ses başlayınca akış başlatılır, sinyal yavaşça kapandıktan sonra durdurulur. Akış çalışırken program her 10 ms'de Windows ses düzeyini, öbür programların tepe düzeyini ve çıkışın kendi ölçerini okur, sinyalin genliğini buna göre ayarlar. Çıkışın ölçeri öbür programların çıkışta gerçekte ne kadar yüksek olduğunu gösterir: Bir programın kendi ses ayarı (örneğin Spotify'ınki) Windows o programın oturumunu ölçtükten sonra uygulanır. Windows'un görüşmeler sırasında öbür sesleri kısma özelliğinin dışında kalır. 32 bit süreç olarak çalışır, bu daha az bellek ister. `tools\sessions.ps1` o anda hangi programların ses çaldığını gösterir.
 
 ## Güncelleme
 
@@ -62,7 +62,7 @@ Program kendini güncellemez. Yeni sürümü yukarıdaki gibi indirip yeniden de
 
 ## Veri gizliliği
 
-Program internete bağlanmaz, hiçbir veri göndermez, kullanım verisi toplamaz. Ayarlarını `%LOCALAPPDATA%\AUXDropoutFix\settings.txt` dosyasından okur, yalnızca `%LOCALAPPDATA%\AUXDropoutFix\log.txt` dosyasına başlama, kapanma, sinyalin açılıp kapanması ve hata satırları yazar. Günlük dosyası 200 KB'ı geçince adı `log.old.txt` olur ve yeni bir dosya başlar.
+Program internete bağlanmaz, hiçbir veri göndermez, kullanım verisi toplamaz. Ayarlarını `%LOCALAPPDATA%\AUXDropoutFix\settings.txt` dosyasından okur, yalnızca `%LOCALAPPDATA%\AUXDropoutFix\log.txt` dosyasına başlama, kapanma, sinyalin açılıp kapanması, sinyaldeki boşluklar (dakikada en çok bir satır) ve hata satırları yazar. Günlük dosyası 200 KB'ı geçince adı `log.old.txt` olur ve yeni bir dosya başlar.
 
 Program **Ayarlar › Uygulamalar › Yüklü uygulamalar**'dan kaldırılınca kapatılır, Windows açılışından silinir, program klasörü ile ayar ve günlük klasörü de silinir.
 

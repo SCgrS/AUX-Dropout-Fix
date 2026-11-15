@@ -9,12 +9,20 @@
 //
 // On outputs with hardware volume, Windows mixes all programs at full scale and lowers the volume only after that.
 // At low Windows volume the boosted signal plus loud sound from another program could go over full scale and
-// crackle, so the signal steps back while the other sound is loud. The speaker does not mute then anyway.
+// crackle, so the signal steps back while the other sound is loud (SignalLevel). The speaker does not mute then
+// anyway.
+//
+// At low Windows volume the signal reaches the speaker about as loud as the music itself, so any gap in it is a loud
+// click. Two things keep it from running dry: about 40 ms of signal are always queued, and the slower calls to the
+// Windows audio service (looking for other programs' sessions) and writing the log run on a thread of their own
+// (SessionScanner). Gaps that still happen are counted and written to the log.
 //
 // Built with the C# compiler that ships with Windows (C# 5, .NET Framework 4): Build.cmd.
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -33,11 +41,18 @@ namespace AuxDropoutFix
         static double MaxDb = -3;
         static double HoldSeconds = 15;
 
-        // The other programs' sound plus the signal is kept below this (full scale is 1).
-        const double MixCeiling = 0.9;
         // A session counts as playing only above this peak (-80 dB), so an open but silent stream does not turn the
         // signal on.
         const double AudiblePeak = 0.0001;
+        // The stream's buffer can hold 100 ms, but only about QueueSeconds of it are kept filled: enough to ride out a
+        // late wake-up, little enough that the signal still follows the Windows volume and the other sounds quickly.
+        const long BufferDuration = 1000000;
+        const double QueueSeconds = 0.04;
+        // Any change of the signal's amplitude is spread over at least this long, however short the pieces of the
+        // buffer that get filled are (Windows wakes us more often while another program uses a low-latency stream).
+        const double RampSeconds = 0.01;
+        // On exit the signal fades out first. If the queued audio has not played out by then, the stream stops anyway.
+        const double ExitFadeLimitSeconds = 0.3;
 
         static readonly string DataFolder = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AUXDropoutFix");
@@ -111,27 +126,31 @@ namespace AuxDropoutFix
                     // An error that keeps coming back right away (for example an unsupported audio format) is logged
                     // once, and each retry waits twice as long, up to a minute.
                     if (attempt.Elapsed.TotalMinutes > 1) { lastError = null; errorWait = 3000; }
+                    FlushLog();
                     if (e.Message != lastError) Log("Error: " + e.Message);
                     lastError = e.Message;
                     exitEvent.WaitOne(errorWait);
                     errorWait = Math.Min(errorWait * 2, 60000);
                 }
             }
+            FlushLog();
             Log("Exited.");
             GC.KeepAlive(instanceLock);
             return 0;
         }
 
         // Streams the signal to one output while other programs play sound on it. Returns when exit is requested,
-        // throws if the output goes away.
+        // throws if the output goes away. Nothing here waits on the disk or on the session list: that is the
+        // SessionScanner's job, so this thread can keep the queue filled.
         static void Run(IMMDevice device)
         {
             IAudioClient client = null;
             IAudioEndpointVolume volume = null;
             IAudioRenderClient renderer = null;
             IAudioSessionManager2 sessionManager = null;
-            var meters = new List<IAudioMeterInformation>();
-            var processes = new List<uint>();
+            IAudioMeterInformation mixMeter = null;
+            SessionScanner scanner = null;
+            MeterSet sessions = null;
             AutoResetEvent bufferEvent = null;
             IntPtr format = IntPtr.Zero;
             uint mmcssIndex = 0;
@@ -149,6 +168,15 @@ namespace AuxDropoutFix
                 g = typeof(IAudioSessionManager2).GUID;
                 Check(device.Activate(ref g, ClsctxAll, IntPtr.Zero, out o), "IAudioSessionManager2");
                 sessionManager = (IAudioSessionManager2)o;
+                // The output's own meter shows the whole mix before the Windows volume, including sound that started
+                // since the last session scan. A meter in the hardware may read after the volume, so it is not used.
+                // The signal works without it, so a failure here is not an error.
+                uint hardware;
+                if (volume.QueryHardwareSupport(out hardware) >= 0 && (hardware & HardwareMeter) == 0)
+                {
+                    g = typeof(IAudioMeterInformation).GUID;
+                    if (device.Activate(ref g, ClsctxAll, IntPtr.Zero, out o) >= 0) mixMeter = o as IAudioMeterInformation;
+                }
 
                 Check(client.GetMixFormat(out format), "GetMixFormat");
                 int tag = (ushort)Marshal.ReadInt16(format, 0);
@@ -165,101 +193,160 @@ namespace AuxDropoutFix
                 if (!(isFloat && bits == 32) && !(!isFloat && bits == 16))
                     throw new Exception("Unsupported audio format: tag " + tag + ", " + bits + " bit");
 
-                // Event driven with a 20 ms buffer: Windows wakes us every 10 ms while the stream runs.
-                Check(client.Initialize(0, AudclntStreamflagsEventcallback, 200000, 0, format, IntPtr.Zero), "Initialize");
+                // Event driven: Windows wakes us once per device period (10 ms) while the stream runs.
+                Check(client.Initialize(0, AudclntStreamflagsEventcallback, BufferDuration, 0, format, IntPtr.Zero), "Initialize");
                 bufferEvent = new AutoResetEvent(false);
                 Check(client.SetEventHandle(bufferEvent.SafeWaitHandle.DangerousGetHandle()), "SetEventHandle");
                 uint bufferFrames;
                 Check(client.GetBufferSize(out bufferFrames), "GetBufferSize");
+                uint queueFrames = Math.Min(bufferFrames, (uint)Math.Ceiling(rate * QueueSeconds));
+                long defaultPeriod, minimumPeriod;
+                if (client.GetDevicePeriod(out defaultPeriod, out minimumPeriod) < 0) defaultPeriod = 100000;
+                double periodSeconds = defaultPeriod / 1e7;
                 g = typeof(IAudioRenderClient).GUID;
                 Check(client.GetService(ref g, out o), "GetService");
                 renderer = (IAudioRenderClient)o;
                 OptOutOfDucking(client);
 
-                try { mmcss = AvSetMmThreadCharacteristics("Audio", ref mmcssIndex); } catch { }
+                mmcss = AvSetMmThreadCharacteristics("Audio", ref mmcssIndex);
+                if (mmcss == IntPtr.Zero)
+                    LogLater("The signal could not get audio priority (error " + Marshal.GetLastWin32Error() + ").");
 
+                // From here on the scanner owns the session manager and releases it.
+                scanner = new SessionScanner(sessionManager, ownProcessId);
+                sessionManager = null;
                 var floatSamples = new float[bufferFrames * channels];
                 var shortSamples = new short[bufferFrames * channels];
-                var wakeUps = new WaitHandle[] { exitEvent, bufferEvent };
-                double phase = 0, step = 2 * Math.PI * Frequency / rate, previous = 0, gate = 0, limit = MixCeiling;
-                double ceiling = Math.Pow(10, MaxDb / 20.0);
-                int fastRamp = Math.Max(1, rate / 200);
+                var runningWait = new WaitHandle[] { exitEvent, bufferEvent };
+                var stoppedWait = new WaitHandle[] { exitEvent, scanner.Scanned };
+                var drainWait = new WaitHandle[] { bufferEvent };
+                var level = new SignalLevel(MaxDb, TargetDb);
+                double phase = 0, step = 2 * Math.PI * Frequency / rate;
+                // The amplitude of the last sample written, and the ramp it is on.
+                double current = 0, rampGoal = 0, rampStep = 0;
+                int rampFrames = Math.Max(1, (int)(rate * RampSeconds));
                 long silentFrames = 0;
                 var clock = Stopwatch.StartNew();
-                double lastSoundAt = -1e9, nextScan = 0;
+                double lastSoundAt = -1e9, exitDeadline = 0, lastWriteAt = 0;
+                uint queuedAtLastWrite = 0;
+                bool exiting = false;
 
-                Log("Ready: " + rate + " Hz, " + channels + " channels, " + bits + " bit, buffer " + bufferFrames + " frames");
+                LogLater("Ready: " + rate + " Hz, " + channels + " channels, " + bits + " bit, buffer " + bufferFrames
+                    + " frames, " + queueFrames + " kept queued, period "
+                    + (defaultPeriod / 10000.0).ToString("0.##", CultureInfo.InvariantCulture) + " ms");
                 while (true)
                 {
-                    // While the stream is stopped nothing wakes us, so we look at the other programs twice a second.
                     if (started)
                     {
-                        int woken = WaitHandle.WaitAny(wakeUps, 2000);
-                        if (woken == 0) return;
+                        int woken = WaitHandle.WaitAny(exiting ? drainWait : runningWait, 2000);
                         if (woken == WaitHandle.WaitTimeout) throw new Exception("Audio device is not responding.");
+                        if (!exiting && woken == 0)
+                        {
+                            exiting = true;
+                            exitDeadline = clock.Elapsed.TotalSeconds + ExitFadeLimitSeconds;
+                        }
                     }
-                    else if (exitEvent.WaitOne(500)) return;
-
-                    // While running, the sessions are looked at only after the buffer has been filled again (below), so
-                    // that a slow look cannot make our own stream run dry.
-                    double now = clock.Elapsed.TotalSeconds;
-                    if (!started && now >= nextScan)
+                    else
                     {
-                        FindPlayingSessions(device, client, sessionManager, meters, processes);
-                        nextScan = now + 0.5;
+                        // While the stream is stopped, the scanner wakes us twice a second. Nothing else would notice
+                        // then that the output went away, and the signal would come on late once sound starts.
+                        if (WaitHandle.WaitAny(stoppedWait, 1000) == 0) return;
+                        int deviceState;
+                        uint idlePadding;
+                        if (device.GetState(out deviceState) < 0 || deviceState != DeviceStateActive)
+                            throw new Exception("The output is no longer available.");
+                        Check(client.GetCurrentPadding(out idlePadding), "GetCurrentPadding");
+                    }
+
+                    MeterSet fresh = scanner.TakeFresh();
+                    if (fresh != null)
+                    {
+                        scanner.Retire(sessions);
+                        sessions = fresh;
                     }
 
                     // The other programs' peaks over the last 10 ms, measured before the Windows volume.
-                    double otherPeak = 0;
+                    double now = clock.Elapsed.TotalSeconds;
+                    double sessionsPeak = 0;
                     int loudest = -1;
                     float loudestPeak = 0;
-                    for (int i = 0; i < meters.Count; i++)
+                    if (sessions != null)
                     {
-                        float peak;
-                        if (meters[i].GetPeakValue(out peak) < 0) continue;
-                        otherPeak += peak;
-                        if (peak > loudestPeak) { loudestPeak = peak; loudest = i; }
+                        for (int i = 0; i < sessions.Meters.Length; i++)
+                        {
+                            float peak;
+                            if (sessions.Meters[i].GetPeakValue(out peak) < 0) continue;
+                            sessionsPeak += peak;
+                            if (peak > loudestPeak) { loudestPeak = peak; loudest = i; }
+                        }
                     }
-                    bool audible = otherPeak > AudiblePeak;
+                    bool audible = sessionsPeak > AudiblePeak;
                     if (audible) lastSoundAt = now;
-                    bool open = audible || now - lastSoundAt < HoldSeconds;
+                    bool open = !exiting && (audible || now - lastSoundAt < HoldSeconds);
 
                     if (!started)
                     {
                         if (!open) continue;
+                        // The queue is filled with silence before the stream starts, so it cannot run dry right away.
+                        IntPtr silence;
+                        Check(renderer.GetBuffer(queueFrames, out silence), "GetBuffer");
+                        Check(renderer.ReleaseBuffer(queueFrames, AudclntBufferflagsSilent), "ReleaseBuffer");
                         Check(client.Start(), "Start");
                         started = true;
-                        gate = 0;
-                        previous = 0;
-                        silentFrames = 0;
-                        Log(loudest >= 0 ? "Sound playing (PID " + processes[loudest] + "), signal on." : "Signal on.");
+                        scanner.Streaming = true;
+                        level.Reset();
+                        phase = 0;
+                        current = rampGoal = rampStep = 0;
+                        silentFrames = queueFrames;
+                        lastWriteAt = clock.Elapsed.TotalSeconds;
+                        queuedAtLastWrite = queueFrames;
+                        LogLater(loudest >= 0 ? "Sound playing (PID " + sessions.Processes[loudest] + "), signal on." : "Signal on.");
                         continue;
                     }
 
                     uint padding;
                     Check(client.GetCurrentPadding(out padding), "GetCurrentPadding");
-                    uint free = bufferFrames - padding;
+                    // Nothing of ours is left, and we woke up later than the queue lasted: Windows had to fill in silence
+                    // for a moment, which is a click. Windows takes a whole period at a time, so the queue looks empty up
+                    // to a period before it runs out: that much lateness is not counted.
+                    double wokeAt = clock.Elapsed.TotalSeconds;
+                    if (padding == 0 && wokeAt - lastWriteAt > (double)queuedAtLastWrite / rate + periodSeconds) scanner.CountGap();
+                    uint free = padding < queueFrames ? queueFrames - padding : 0;
                     if (free > 0)
                     {
-                        double seconds = (double)free / rate;
-                        gate = open ? Math.Min(1, gate + seconds / 0.5) : Math.Max(0, gate - seconds / 2.0);
-                        // Steps back at once when the other sound gets loud, and comes back within 0.3 s when it gets quiet.
-                        double room = Math.Max(0, MixCeiling - otherPeak);
-                        limit = room < limit ? room : Math.Min(room, limit + seconds / 0.3);
+                        double start = current, target;
+                        if (exiting) target = level.FadeOut();
+                        else
+                        {
+                            float masterDb, mixPeak;
+                            Check(volume.GetMasterVolumeLevel(out masterDb), "GetMasterVolumeLevel");
+                            if (mixMeter == null || mixMeter.GetPeakValue(out mixPeak) < 0) mixPeak = -1;
+                            scanner.MasterDb = masterDb;
+                            target = level.Next((double)free / rate, open, sessionsPeak, mixPeak, masterDb);
+                            if (level.MeterIgnored && mixMeter != null)
+                            {
+                                LogLater("The output's meter does not show the signal, so only the session meters are used.");
+                                Release(mixMeter);
+                                mixMeter = null;
+                            }
+                        }
 
-                        float masterDb;
-                        Check(volume.GetMasterVolumeLevel(out masterDb), "GetMasterVolumeLevel");
-                        double target = gate * Math.Min(Math.Min(ceiling, limit), Math.Pow(10, (TargetDb - masterDb) / 20.0));
-
-                        // Going down (Windows volume turned up, loud sound starting) takes 5 ms, going up spans the whole
-                        // buffer. The older samples already in the buffer still play at their level, up to 20 ms.
-                        int ramp = target < previous ? Math.Min(fastRamp, (int)free) : (int)free;
+                        // Each change is spread over RampSeconds, and the ramp carries on into the next fill. The older
+                        // samples already queued still play at their level, up to QueueSeconds.
+                        if (target != rampGoal)
+                        {
+                            rampGoal = target;
+                            rampStep = Math.Abs(target - current) / rampFrames;
+                        }
+                        double highest = current;
                         IntPtr data;
                         Check(renderer.GetBuffer(free, out data), "GetBuffer");
                         for (int i = 0; i < free; i++)
                         {
-                            double amplitude = i < ramp ? previous + (target - previous) * (i + 1) / ramp : target;
-                            double s = amplitude * Math.Sin(phase);
+                            if (current < target) current = Math.Min(target, current + rampStep);
+                            else if (current > target) current = Math.Max(target, current - rampStep);
+                            if (current > highest) highest = current;
+                            double s = current * Math.Sin(phase);
                             phase += step;
                             if (phase >= 2 * Math.PI) phase -= 2 * Math.PI;
                             for (int c = 0; c < channels; c++)
@@ -268,77 +355,43 @@ namespace AuxDropoutFix
                                 else shortSamples[i * channels + c] = (short)(s * 32767);
                             }
                         }
-                        silentFrames = target == 0 && previous == 0 ? silentFrames + free : 0;
-                        previous = target;
+                        level.Wrote((double)free / rate, highest);
+                        silentFrames = start == 0 && target == 0 ? silentFrames + free : 0;
                         if (isFloat) Marshal.Copy(floatSamples, 0, data, (int)free * channels);
                         else Marshal.Copy(shortSamples, 0, data, (int)free * channels);
                         Check(renderer.ReleaseBuffer(free, 0), "ReleaseBuffer");
+                        lastWriteAt = clock.Elapsed.TotalSeconds;
+                        queuedAtLastWrite = padding + free;
                     }
 
-                    // Nothing has played for HoldSeconds and the whole buffer holds silence: stop the stream.
-                    if (!open && silentFrames >= bufferFrames)
+                    // The signal is off and everything still queued is silence: stop the stream (or, on exit, return).
+                    if (!open && silentFrames >= padding + free)
                     {
+                        if (exiting) return;
                         Check(client.Stop(), "Stop");
                         Check(client.Reset(), "Reset");
                         started = false;
-                        Log("No sound playing, signal off.");
+                        scanner.Streaming = false;
+                        LogLater("No sound playing, signal off.");
                     }
-                    else if (now >= nextScan)
-                    {
-                        FindPlayingSessions(device, client, sessionManager, meters, processes);
-                        nextScan = now + 0.5;
-                    }
+                    else if (exiting && clock.Elapsed.TotalSeconds > exitDeadline) return;
                 }
             }
             finally
             {
                 if (started) { try { client.Stop(); } catch { } }
                 if (mmcss != IntPtr.Zero) { try { AvRevertMmThreadCharacteristics(mmcss); } catch { } }
-                if (format != IntPtr.Zero) Marshal.FreeCoTaskMem(format);
-                foreach (var meter in meters) Release(meter);
-                Release(sessionManager); Release(renderer); Release(volume); Release(client); Release(device);
-                if (bufferEvent != null) bufferEvent.Dispose();
-            }
-        }
-
-        // Collects the peak meters of the sessions that other programs have active on the output right now. First makes
-        // sure that the output is still there and our stream still works: while the stream is stopped, nothing else
-        // would notice, and the signal would come on late once sound starts.
-        static void FindPlayingSessions(IMMDevice device, IAudioClient client, IAudioSessionManager2 manager,
-            List<IAudioMeterInformation> meters, List<uint> processes)
-        {
-            int deviceState;
-            uint padding;
-            if (device.GetState(out deviceState) < 0 || deviceState != DeviceStateActive)
-                throw new Exception("The output is no longer available.");
-            Check(client.GetCurrentPadding(out padding), "GetCurrentPadding");
-            foreach (var meter in meters) Release(meter);
-            meters.Clear();
-            processes.Clear();
-            IAudioSessionEnumerator list;
-            Check(manager.GetSessionEnumerator(out list), "GetSessionEnumerator");
-            try
-            {
-                int count;
-                Check(list.GetCount(out count), "GetCount");
-                for (int i = 0; i < count; i++)
+                if (scanner != null)
                 {
-                    object o;
-                    if (list.GetSession(i, out o) < 0 || o == null) continue;
-                    var session = o as IAudioSessionControl2;
-                    var meter = o as IAudioMeterInformation;
-                    int state;
-                    uint process;
-                    if (session != null && meter != null && session.GetState(out state) >= 0 && state == 1
-                        && session.GetProcessId(out process) >= 0 && process != ownProcessId)
-                    {
-                        meters.Add(meter);
-                        processes.Add(process);
-                    }
-                    else Release(o);
+                    scanner.Retire(sessions);
+                    scanner.Dispose();
                 }
+                else if (sessions != null) sessions.Release();
+                if (format != IntPtr.Zero) Marshal.FreeCoTaskMem(format);
+                Release(mixMeter); Release(sessionManager); Release(renderer); Release(volume); Release(client); Release(device);
+                if (bufferEvent != null) bufferEvent.Dispose();
+                FlushLog();
             }
-            finally { Release(list); }
         }
 
         // Windows lowers other programs' sound during calls (the Communications tab of the classic Sound settings),
@@ -429,8 +482,8 @@ namespace AuxDropoutFix
                     string name = eq < 0 ? "" : line.Substring(0, eq).Trim().ToLowerInvariant();
                     string value = eq < 0 ? "" : line.Substring(eq + 1).Trim();
                     double number;
-                    bool isNumber = double.TryParse(value.Replace(',', '.'), System.Globalization.NumberStyles.Float,
-                        System.Globalization.CultureInfo.InvariantCulture, out number);
+                    bool isNumber = double.TryParse(value.Replace(',', '.'), NumberStyles.Float,
+                        CultureInfo.InvariantCulture, out number);
                     // The limits keep a typo from making the signal audible or loud. They also rule out NaN and infinity.
                     if (name == "output") Output = value;
                     else if (name == "frequency" && isNumber && number >= 10 && number <= 30) Frequency = number;
@@ -446,30 +499,55 @@ namespace AuxDropoutFix
             }
         }
 
-        static void Log(string message)
+        static readonly object logLock = new object();
+        static readonly ConcurrentQueue<KeyValuePair<DateTime, string>> laterLines =
+            new ConcurrentQueue<KeyValuePair<DateTime, string>>();
+
+        internal static void Log(string message)
         {
-            try
-            {
-                Directory.CreateDirectory(DataFolder);
-                string path = Path.Combine(DataFolder, "log.txt");
-                // Past 200 KB the log becomes log.old.txt, so the lines before the switch are not lost at once.
-                if (File.Exists(path) && new FileInfo(path).Length > 200000)
-                {
-                    string old = Path.Combine(DataFolder, "log.old.txt");
-                    File.Delete(old);
-                    File.Move(path, old);
-                }
-                File.AppendAllText(path, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + message + Environment.NewLine, Encoding.UTF8);
-            }
-            catch { }
+            Write(DateTime.Now, message);
         }
 
-        static void Check(int hr, string what)
+        // For the signal thread: the line keeps the time it was logged, but the SessionScanner writes it to the disk, so
+        // a slow disk cannot hold up the signal.
+        internal static void LogLater(string message)
+        {
+            laterLines.Enqueue(new KeyValuePair<DateTime, string>(DateTime.Now, message));
+        }
+
+        internal static void FlushLog()
+        {
+            KeyValuePair<DateTime, string> line;
+            while (laterLines.TryDequeue(out line)) Write(line.Key, line.Value);
+        }
+
+        static void Write(DateTime time, string message)
+        {
+            lock (logLock)
+            {
+                try
+                {
+                    Directory.CreateDirectory(DataFolder);
+                    string path = Path.Combine(DataFolder, "log.txt");
+                    // Past 200 KB the log becomes log.old.txt, so the lines before the switch are not lost at once.
+                    if (File.Exists(path) && new FileInfo(path).Length > 200000)
+                    {
+                        string old = Path.Combine(DataFolder, "log.old.txt");
+                        File.Delete(old);
+                        File.Move(path, old);
+                    }
+                    File.AppendAllText(path, time.ToString("yyyy-MM-dd HH:mm:ss") + "  " + message + Environment.NewLine, Encoding.UTF8);
+                }
+                catch { }
+            }
+        }
+
+        internal static void Check(int hr, string what)
         {
             if (hr < 0) throw new Exception(what + " failed (0x" + hr.ToString("X8") + ")");
         }
 
-        static void Release(object o)
+        internal static void Release(object o)
         {
             if (o != null && Marshal.IsComObject(o)) { try { Marshal.ReleaseComObject(o); } catch { } }
         }
@@ -477,11 +555,367 @@ namespace AuxDropoutFix
         const int ClsctxAll = 23;
         const int DeviceStateActive = 1;
         const uint AudclntStreamflagsEventcallback = 0x00040000;
+        const uint AudclntBufferflagsSilent = 0x2;
+        const uint HardwareMeter = 0x4;
 
-        [DllImport("avrt.dll", CharSet = CharSet.Unicode)]
+        [DllImport("avrt.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         static extern IntPtr AvSetMmThreadCharacteristics(string task, ref uint index);
         [DllImport("avrt.dll")]
         static extern bool AvRevertMmThreadCharacteristics(IntPtr handle);
+    }
+
+    // Works out the signal's amplitude for each piece of the buffer that gets filled. Kept apart from the audio code,
+    // so it can be tried out with made-up readings.
+    sealed class SignalLevel
+    {
+        // The other programs' sound plus the signal is kept below this (full scale is 1).
+        public const double MixCeiling = 0.9;
+        // The loudest peak of the other sound is held for PeakHoldSeconds after it was last reached, then comes down by
+        // PeakRelease per second (full scale per second). Music has its loud notes every second or so: the signal stays
+        // down between them instead of coming back up just in time for the next one. Once it gets quiet, the signal is
+        // back within about three seconds, and the speaker needs about ten quiet seconds before it mutes.
+        public const double PeakHoldSeconds = 2;
+        public const double PeakRelease = 0.5;
+        public const double PeakRenew = 0.75;
+
+        // A session's meter reads before the program's own volume control (Spotify's volume slider, for example), so
+        // it can show the sound much louder than it reaches the output. Ratio is how much of the sessions' level
+        // actually reaches the mix: the highest value seen recently, coming down by RatioRelease per second so that it
+        // follows a volume turned down. It starts at 0 and is learned upward: right after the stream starts the signal is
+        // still near 0, so the output's meter shows the other sound alone. Each estimate uses the previous fill's mix
+        // reading and the highest session reading around it, in case the two meters were read an engine period apart.
+        public const double RatioRelease = 0.2;
+        // Above this, Windows' own limiter may be holding the mix down: the output's meter cannot tell by how much it is
+        // over, so the signal steps back at once, the harder the further over.
+        public const double SaturatedMix = 0.95;
+        // Our own signal can still be in the output meter's reading for the queue plus one meter period.
+        public const double OwnWindowSeconds = 0.1;
+        // The output's meter must show our own signal. On an output whose meter reads after the volume, or not at all,
+        // it would always show much less: after DoubtSeconds of that, only the session meters are used.
+        public const double DoubtSeconds = 3;
+
+        readonly double ceiling, targetDb;
+        // Length and highest amplitude of the recent fills, newest at wroteNext - 1.
+        readonly double[] wroteSeconds = new double[64], wroteHighest = new double[64];
+        int wroteNext;
+        // The last three fills' readings, the newest at index newest. readings counts them up to 2.
+        readonly double[] lastMix = new double[3], lastOwn = new double[3], lastSessions = new double[3];
+        int newest, readings;
+        double gate, heldPeak, heldFor, ratio, doubtedFor;
+        bool meterIgnored;
+
+        public SignalLevel(double maxDb, double targetDb)
+        {
+            ceiling = Math.Pow(10, maxDb / 20.0);
+            this.targetDb = targetDb;
+        }
+
+        // True once the output's meter has turned out not to show our own signal.
+        public bool MeterIgnored { get { return meterIgnored; } }
+
+        public void Reset()
+        {
+            gate = 0;
+            heldPeak = 0;
+            heldFor = 0;
+            ratio = 0;
+            newest = 0;
+            readings = 0;
+            doubtedFor = 0;
+            Array.Clear(wroteSeconds, 0, wroteSeconds.Length);
+            Array.Clear(wroteHighest, 0, wroteHighest.Length);
+            Array.Clear(lastMix, 0, 3);
+            Array.Clear(lastOwn, 0, 3);
+            Array.Clear(lastSessions, 0, 3);
+        }
+
+        // seconds: how much audio this fill covers. open: whether the signal should be on. sessionsPeak: the sum of the
+        // other programs' session peaks. mixPeak: the output meter's peak of the whole mix, or below 0 without a
+        // reading. It includes the signal itself and also sounds that started after the last session scan. masterDb:
+        // the Windows volume. Returns the amplitude to go to.
+        public double Next(double seconds, bool open, double sessionsPeak, double mixPeak, double masterDb)
+        {
+            gate = open ? Math.Min(1, gate + seconds / 0.5) : Math.Max(0, gate - seconds / 2.0);
+
+            double others = sessionsPeak;
+            bool useMeter = mixPeak >= 0 && !meterIgnored;
+            double own = useMeter ? Own() : 0;
+            // While our signal is clearly there, the meter has to show at least half of it. It shows less for a moment
+            // while the signal steps down (own still remembers the higher level), so only a doubt that lasts counts. With
+            // the signal low, the meter can neither be confirmed nor doubted.
+            if (useMeter && own > 0.2)
+            {
+                if (mixPeak < 0.5 * own)
+                {
+                    doubtedFor += seconds;
+                    if (doubtedFor > DoubtSeconds) meterIgnored = true;
+                }
+                else doubtedFor = 0;
+            }
+            // A meter in doubt is left out: the session meters alone, as without it.
+            if (doubtedFor > 0.3) useMeter = false;
+            if (useMeter && doubtedFor > 0) others = sessionsPeak * ratio;
+            else if (useMeter)
+            {
+                // Our own signal can have added at most `own` to the mix's peak, or taken at most `own` away from it.
+                double atLeast = mixPeak - own;
+                int previous = newest;
+                newest = (newest + 1) % 3;
+                lastMix[newest] = mixPeak;
+                lastOwn[newest] = own;
+                lastSessions[newest] = sessionsPeak;
+                if (readings < 2) readings++;
+                double sessionsAround = Math.Max(lastSessions[0], Math.Max(lastSessions[1], lastSessions[2]));
+                if (readings >= 2 && sessionsAround > 0.05)
+                {
+                    double seen = (lastMix[previous] - lastOwn[previous]) / sessionsAround;
+                    ratio = Math.Max(Math.Max(0, Math.Min(1, seen)), ratio - seconds * RatioRelease);
+                }
+                others = sessionsPeak * ratio;
+                if (mixPeak < SaturatedMix) others = Math.Min(others, mixPeak + own);
+                others = Math.Max(others, atLeast);
+                if (mixPeak >= SaturatedMix) others = Math.Max(others, Math.Min(1, heldPeak + 2 * (mixPeak - MixCeiling)));
+            }
+            // A peak that comes back almost as loud keeps the hold going: the readings scatter a little from note to note.
+            if (others >= heldPeak)
+            {
+                heldPeak = others;
+                heldFor = 0;
+            }
+            else if (others >= heldPeak * PeakRenew) heldFor = 0;
+            else
+            {
+                heldFor += seconds;
+                if (heldFor > PeakHoldSeconds) heldPeak = Math.Max(others, heldPeak - seconds * PeakRelease);
+            }
+
+            double room = Math.Max(0, MixCeiling - heldPeak);
+            return gate * Math.Min(Math.Min(ceiling, room), Math.Pow(10, (targetDb - masterDb) / 20.0));
+        }
+
+        // On exit: down to zero.
+        public double FadeOut()
+        {
+            gate = 0;
+            return 0;
+        }
+
+        // Called after each fill with its length and the highest amplitude written in it.
+        public void Wrote(double seconds, double highest)
+        {
+            wroteSeconds[wroteNext] = seconds;
+            wroteHighest[wroteNext] = highest;
+            wroteNext = (wroteNext + 1) % wroteSeconds.Length;
+        }
+
+        // The most our signal can be adding to what the output's meter shows right now.
+        double Own()
+        {
+            double total = 0, own = 0;
+            for (int k = 1; k <= wroteSeconds.Length && total < OwnWindowSeconds; k++)
+            {
+                int i = (wroteNext - k + wroteSeconds.Length) % wroteSeconds.Length;
+                total += wroteSeconds[i];
+                if (wroteHighest[i] > own) own = wroteHighest[i];
+            }
+            return own;
+        }
+    }
+
+    // The peak meters of the other programs' sessions at one moment, with the process each belongs to.
+    sealed class MeterSet
+    {
+        public readonly IAudioMeterInformation[] Meters;
+        public readonly uint[] Processes;
+
+        public MeterSet(IAudioMeterInformation[] meters, uint[] processes)
+        {
+            Meters = meters;
+            Processes = processes;
+        }
+
+        public void Release()
+        {
+            foreach (var meter in Meters) Program.Release(meter);
+        }
+    }
+
+    // Looks for the other programs' audio sessions on a thread of its own, and writes the log lines that the signal
+    // thread leaves for it. Going through the session list means several calls to the Windows audio service, which can
+    // be slow while that service is busy (for example while another program opens its stream). While the signal plays,
+    // it looks ten times a second, so a program that opens a new session is soon measured on its own. While the stream
+    // is stopped, twice a second is enough to notice sound starting.
+    //
+    // A new list is handed over with TakeFresh. The signal thread gives the list it no longer reads back with Retire,
+    // and only this thread releases lists, so a meter is never released while the signal thread may still read it.
+    // This thread also owns the session manager and releases everything itself once it stops, so a scan that is stuck
+    // in a call to the audio service never has something released under it.
+    sealed class SessionScanner : IDisposable
+    {
+        const int ScanMilliseconds = 500;
+        const int StreamingScanMilliseconds = 100;
+        const double GapReportSeconds = 60;
+
+        public readonly AutoResetEvent Scanned = new AutoResetEvent(false);
+        // Written by the signal thread: whether its stream runs, and the Windows volume for the gap report.
+        public volatile bool Streaming;
+        public volatile float MasterDb;
+
+        readonly IAudioSessionManager2 manager;
+        readonly int ownProcessId;
+        readonly ManualResetEvent stop = new ManualResetEvent(false);
+        readonly ConcurrentQueue<MeterSet> retired = new ConcurrentQueue<MeterSet>();
+        readonly Thread thread;
+        readonly Stopwatch clock = Stopwatch.StartNew();
+        readonly object gapLock = new object();
+        MeterSet fresh;
+        int gaps;
+        long firstGapTicks;
+        double lastGapReport = -1e9;
+        string lastError;
+
+        public SessionScanner(IAudioSessionManager2 manager, int ownProcessId)
+        {
+            this.manager = manager;
+            this.ownProcessId = ownProcessId;
+            thread = new Thread(Loop, 256 * 1024);
+            thread.IsBackground = true;
+            thread.Name = "Session scan";
+            thread.Start();
+        }
+
+        public MeterSet TakeFresh()
+        {
+            return Interlocked.Exchange(ref fresh, null);
+        }
+
+        public void Retire(MeterSet set)
+        {
+            if (set != null) retired.Enqueue(set);
+        }
+
+        // Called by the signal thread when its queue ran dry. The lock is only ever held for a few instructions.
+        public void CountGap()
+        {
+            lock (gapLock)
+            {
+                if (gaps == 0) firstGapTicks = DateTime.Now.Ticks;
+                gaps++;
+            }
+        }
+
+        void Loop()
+        {
+            try { Scanning(); }
+            finally
+            {
+                ReleaseRetired();
+                MeterSet unused = Interlocked.Exchange(ref fresh, null);
+                if (unused != null) unused.Release();
+                Program.Release(manager);
+                ReportGaps(true);
+                Program.FlushLog();
+            }
+        }
+
+        void Scanning()
+        {
+            do
+            {
+                ReleaseRetired();
+                try
+                {
+                    MeterSet set = Scan();
+                    lastError = null;
+                    // A list the signal thread never took is released here.
+                    MeterSet unused = Interlocked.Exchange(ref fresh, set);
+                    if (unused != null) unused.Release();
+                }
+                catch (Exception e)
+                {
+                    // The signal thread notices on its own when the output goes away.
+                    if (e.Message != lastError) Program.LogLater("Looking for sessions failed: " + e.Message);
+                    lastError = e.Message;
+                }
+                Scanned.Set();
+                ReportGaps(false);
+                Program.FlushLog();
+            } while (!stop.WaitOne(Streaming ? StreamingScanMilliseconds : ScanMilliseconds));
+        }
+
+        MeterSet Scan()
+        {
+            var meters = new List<IAudioMeterInformation>();
+            var processes = new List<uint>();
+            IAudioSessionEnumerator list;
+            Program.Check(manager.GetSessionEnumerator(out list), "GetSessionEnumerator");
+            try
+            {
+                int count;
+                Program.Check(list.GetCount(out count), "GetCount");
+                for (int i = 0; i < count; i++)
+                {
+                    object o;
+                    if (list.GetSession(i, out o) < 0 || o == null) continue;
+                    var session = o as IAudioSessionControl2;
+                    var meter = o as IAudioMeterInformation;
+                    int state;
+                    uint process;
+                    // Inactive sessions (0) are kept too: their meter reads 0 until they play again, and then the
+                    // signal thread sees it at once rather than at the next scan. Expired sessions (2) are left out.
+                    if (session != null && meter != null && session.GetState(out state) >= 0 && state != 2
+                        && session.GetProcessId(out process) >= 0 && process != ownProcessId)
+                    {
+                        meters.Add(meter);
+                        processes.Add(process);
+                    }
+                    else Program.Release(o);
+                }
+            }
+            catch
+            {
+                foreach (var meter in meters) Program.Release(meter);
+                throw;
+            }
+            finally { Program.Release(list); }
+            return new MeterSet(meters.ToArray(), processes.ToArray());
+        }
+
+        void ReleaseRetired()
+        {
+            MeterSet set;
+            while (retired.TryDequeue(out set)) set.Release();
+        }
+
+        // At most one line a minute, so a bad stretch does not flood the log.
+        void ReportGaps(bool final)
+        {
+            double now = clock.Elapsed.TotalSeconds;
+            if (!final && now - lastGapReport < GapReportSeconds) return;
+            int count;
+            long first;
+            lock (gapLock)
+            {
+                count = gaps;
+                first = firstGapTicks;
+                gaps = 0;
+            }
+            if (count == 0) return;
+            lastGapReport = now;
+            Program.LogLater("Gap in the signal: " + count + (count == 1 ? " time" : " times")
+                + (first > 0 ? ", first at " + new DateTime(first).ToString("HH:mm:ss") : "")
+                + ", Windows volume " + MasterDb.ToString("0.0", CultureInfo.InvariantCulture) + " dB");
+        }
+
+        // Stops the thread, which releases everything on its way out. If a scan is stuck in a call to the audio service,
+        // this gives up waiting after a while and the thread cleans up whenever that call returns.
+        public void Dispose()
+        {
+            stop.Set();
+            if (!thread.Join(5000)) return;
+            stop.Close();
+            Scanned.Close();
+        }
     }
 
     [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -539,6 +973,17 @@ namespace AuxDropoutFix
         [PreserveSig] int SetMasterVolumeLevel(float db, ref Guid context);
         [PreserveSig] int SetMasterVolumeLevelScalar(float level, ref Guid context);
         [PreserveSig] int GetMasterVolumeLevel(out float db);
+        [PreserveSig] int GetMasterVolumeLevelScalar(out float level);
+        [PreserveSig] int SetChannelVolumeLevel(uint channel, float db, ref Guid context);
+        [PreserveSig] int SetChannelVolumeLevelScalar(uint channel, float level, ref Guid context);
+        [PreserveSig] int GetChannelVolumeLevel(uint channel, out float db);
+        [PreserveSig] int GetChannelVolumeLevelScalar(uint channel, out float level);
+        [PreserveSig] int SetMute([MarshalAs(UnmanagedType.Bool)] bool mute, ref Guid context);
+        [PreserveSig] int GetMute([MarshalAs(UnmanagedType.Bool)] out bool mute);
+        [PreserveSig] int GetVolumeStepInfo(out uint step, out uint stepCount);
+        [PreserveSig] int VolumeStepUp(ref Guid context);
+        [PreserveSig] int VolumeStepDown(ref Guid context);
+        [PreserveSig] int QueryHardwareSupport(out uint mask);
     }
 
     [ComImport, Guid("C02216F6-8C67-4B5B-9D00-D008E73E0064"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]

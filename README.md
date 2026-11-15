@@ -34,7 +34,7 @@ The signal goes to the first active speaker or line output of the "High Definiti
 
 Below about 7% Windows volume, the signal cannot be boosted any further and starts to get weaker. On the JBL Charge 4 there were no dropouts at 5%. Below that, the speaker may mute again.
 
-While another program plays loudly, the signal steps back so that the two together do not go over full scale and crackle. The speaker does not mute during loud passages anyway.
+While another program plays loudly, the signal steps back so that the two together do not go over full scale and crackle. It stays back for about two seconds after the last loud note, so the next one does not catch it on its way up. The speaker does not mute during loud passages anyway.
 
 ### Settings
 
@@ -54,7 +54,7 @@ If the speaker is connected to the same PC with both the AUX cable and a USB cha
 
 ### How it works
 
-The program opens its own audio stream on the output with WASAPI (shared mode, event driven, 20 ms buffer). Every half second it checks the audio sessions on that output. A session from another program counts as playing only while it actually produces sound, so a program that keeps a silent stream open does not turn the signal on. The stream is started when sound begins and stopped once the signal has faded out. While it runs, the program reads the Windows volume and the other programs' peak levels every 10 ms and sets the signal's amplitude to match. It opts out of the Windows feature that lowers other sounds during calls, and it runs as a 32-bit process, which needs less memory. `tools\sessions.ps1` shows which programs are playing sound right now.
+The program opens its own audio stream on the output with WASAPI (shared mode, event driven) and keeps about 40 ms of the signal queued, so a moment of heavy load on the PC does not leave a gap in it. A separate thread looks for the audio sessions on that output, ten times a second while the signal plays and twice a second otherwise, so the signal never waits for it. A session from another program counts as playing only while it actually produces sound, so a program that keeps a silent stream open does not turn the signal on. The stream is started when sound begins and stopped once the signal has faded out. While it runs, the program reads the Windows volume, the other programs' peak levels and the output's own meter every 10 ms and sets the signal's amplitude to match. The output's meter shows how loud the other programs really are on the output: a program's own volume control (Spotify's, for example) is applied after Windows measures its session. The program opts out of the Windows feature that lowers other sounds during calls, and it runs as a 32-bit process, which needs less memory. `tools\sessions.ps1` shows which programs are playing sound right now.
 
 ## Updating
 
@@ -62,7 +62,7 @@ The program does not update itself. To install a new version, download and build
 
 ## Privacy
 
-The program does not connect to the internet, sends nothing and has no telemetry. It reads its settings from `%LOCALAPPDATA%\AUXDropoutFix\settings.txt` and only writes start, stop, signal on and off, and error lines to `%LOCALAPPDATA%\AUXDropoutFix\log.txt`. Once the log passes 200 KB, it is renamed to `log.old.txt` and a new one is started.
+The program does not connect to the internet, sends nothing and has no telemetry. It reads its settings from `%LOCALAPPDATA%\AUXDropoutFix\settings.txt` and only writes start, stop, signal on and off, gaps in the signal (at most one line a minute) and error lines to `%LOCALAPPDATA%\AUXDropoutFix\log.txt`. Once the log passes 200 KB, it is renamed to `log.old.txt` and a new one is started.
 
 Uninstalling it from **Settings › Apps › Installed apps** stops the program, removes it from Windows startup, and deletes its program folder and its settings and log folder.
 
